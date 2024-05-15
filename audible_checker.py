@@ -157,10 +157,7 @@ def fetch_audible_data(auth):
         if DEBUG_RAW_RESPONSE:
             with open('library_raw_response.json', 'w') as f:
                 json.dump(library, f)
-        if TEST_MODE:
-            log_and_print(f"Fetched library data: {library}", always_print=True)
-        else:
-            log_and_print("Fetched library data", always_print=True)
+        log_and_print("Fetched library data", always_print=True)
         
         wishlist = client.get(
             "1.0/wishlist",
@@ -170,10 +167,7 @@ def fetch_audible_data(auth):
         if DEBUG_RAW_RESPONSE:
             with open('wishlist_raw_response.json', 'w') as f:
                 json.dump(wishlist, f)
-        if TEST_MODE:
-            log_and_print(f"Fetched wishlist data: {wishlist}", always_print=True)
-        else:
-            log_and_print("Fetched wishlist data", always_print=True)
+        log_and_print("Fetched wishlist data", always_print=True)
         
         return library, wishlist
     except Exception as e:
@@ -184,11 +178,12 @@ def fetch_audible_data(auth):
 def parse_books(data, status, downloaded=False):
     """ Parse book data """
     books = []
-    if 'items' not in data:
-        log_and_print(f"Expected key 'items' not found in data", logging.ERROR, always_print=True)
+    key = 'items' if 'items' in data else 'products' if 'products' in data else None
+    if not key:
+        log_and_print(f"Expected key 'items' or 'products' not found in data: {data}", logging.ERROR, always_print=True)
         return books
 
-    for item in data["items"]:
+    for item in data[key]:
         # Ensure authors are correctly fetched from 'authors' key if 'contributors' is missing
         contributors = item.get("contributors", [])
         if not contributors:
@@ -300,10 +295,14 @@ def main():
         
         books_added = 0
         books_updated = 0
+        wishlist_items_added = 0  # Counter for wishlist items added
 
+        library_titles = set()
+        
         if library:
             library_books = parse_books(library, status="Library", downloaded=True)
             for book in library_books:
+                library_titles.add(book["Title"])
                 result = insert_or_update_book(conn, book)
                 if result is True:
                     books_added += 1
@@ -313,17 +312,23 @@ def main():
         if wishlist:
             wishlist_books = parse_books(wishlist, status="Wishlist", downloaded=False)
             for book in wishlist_books:
-                result = insert_or_update_book(conn, book)
-                if result is True:
-                    books_added += 1
-                elif result is False:
-                    books_updated += 1
+                if book["Title"] not in library_titles:
+                    result = insert_or_update_book(conn, book)
+                    if result is True:
+                        books_added += 1
+                        wishlist_items_added += 1  # Increment wishlist items added counter
+                    elif result is False:
+                        books_updated += 1
         
         conn.close()
         log_and_print("Database connection closed", always_print=True)
+        log_and_print(f"Number of wishlist items added: {wishlist_items_added}", always_print=True)  # Log wishlist items added
         log_and_print(f"Script execution complete. {books_added} books added and {books_updated} books updated in the database.", always_print=True)
     else:
         log_and_print("Error! Cannot create the database connection.", logging.ERROR, always_print=True)
+
+
+
 
 
 
