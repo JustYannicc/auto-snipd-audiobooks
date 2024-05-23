@@ -25,7 +25,7 @@ logger.addHandler(handler)
 # Define database and table name
 DATABASE = 'audible_library.db'
 TABLE_NAME = 'books'
-TEST_MODE = True  # Change to True for more verbosity
+TEST_MODE = False  # Change to True for more verbosity
 
 def log_and_print(message, level=logging.INFO, always_print=False):
     if TEST_MODE or always_print:
@@ -57,8 +57,9 @@ def create_table(conn):
         cur = conn.cursor()
         cur.execute(f'''
         CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            ASIN TEXT PRIMARY KEY,
             Author TEXT,
-            Title TEXT PRIMARY KEY,
+            Title TEXT,
             Description TEXT,
             Length TEXT,
             EPUB_Column TEXT,
@@ -77,7 +78,7 @@ def insert_or_update_book(conn, book):
     """ Insert or update a book in the table """
     try:
         cur = conn.cursor()
-        cur.execute(f"SELECT Author, Description, Length, Cover_URL, Title, Status FROM {TABLE_NAME} WHERE Title = ?", (book["Title"],))
+        cur.execute(f"SELECT Author, Description, Length, Cover_URL, Title, Status FROM {TABLE_NAME} WHERE ASIN = ?", (book["ASIN"],))
         result = cur.fetchone()
         if result:
             current_author, current_description, current_length, current_cover_url, title, status = result
@@ -104,7 +105,7 @@ def insert_or_update_book(conn, book):
                 cur.execute(f'''
                 UPDATE {TABLE_NAME}
                 SET Author = ?, Description = ?, Length = ?, EPUB_Column = ?, Downloaded = ?, Cover_URL = ?, Finished = ?, Status = ?
-                WHERE Title = ?
+                WHERE ASIN = ?
                 ''', (book["Author"], 
                       book["Description"],
                       book["Length"], 
@@ -113,7 +114,7 @@ def insert_or_update_book(conn, book):
                       book["Cover_URL"], 
                       book["Finished"], 
                       book["Status"], 
-                      book["Title"]))
+                      book["ASIN"]))
                 conn.commit()
                 log_and_print(f"Book '{book['Title']}' updated in database", logging.INFO)
                 return False  # Update occurred
@@ -121,9 +122,10 @@ def insert_or_update_book(conn, book):
                 return None  # No update needed
         else:
             cur.execute(f'''
-            INSERT INTO {TABLE_NAME} (Author, Title, Description, Length, EPUB_Column, Downloaded, Cover_URL, Finished, Status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (book["Author"], 
+            INSERT INTO {TABLE_NAME} (ASIN, Author, Title, Description, Length, EPUB_Column, Downloaded, Cover_URL, Finished, Status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (book["ASIN"],
+                  book["Author"], 
                   book["Title"], 
                   book["Description"],
                   book["Length"], 
@@ -253,6 +255,7 @@ def parse_books(data, status, downloaded=False):
         return books
 
     for item in data:
+        asin = item.get("ASIN", "Unknown ASIN")
         author = item.get("Author", "Unknown")
         title = item.get("Title", "Unknown Title")
         description = item.get("Description", "No description available")
@@ -261,6 +264,7 @@ def parse_books(data, status, downloaded=False):
         finished = item.get("Finished", False)
 
         book = {
+            "ASIN": asin,
             "Author": author,
             "Title": title,
             "Description": description,
