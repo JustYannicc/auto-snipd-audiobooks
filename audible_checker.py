@@ -1,12 +1,11 @@
-import audible
+import os
 import sqlite3
 import logging
-import os
-import pyotp
 from sqlite3 import Error
 from logging.handlers import RotatingFileHandler
-import re
 import json
+import subprocess
+from unittest import result
 
 # Configure logging
 LOG_FILENAME = 'audible_checker.log'
@@ -26,9 +25,7 @@ logger.addHandler(handler)
 # Define database and table name
 DATABASE = 'audible_library.db'
 TABLE_NAME = 'books'
-AUTH_FILE = 'audible_auth.json'
-TEST_MODE = False  # Change to True for more verbosity
-DEBUG_RAW_RESPONSE = False  # Change to True to log raw API responses
+TEST_MODE = True  # Change to True for more verbosity
 
 def log_and_print(message, level=logging.INFO, always_print=False):
     if TEST_MODE or always_print:
@@ -75,7 +72,6 @@ def create_table(conn):
         log_and_print("Table created or already exists", always_print=True)
     except Error as e:
         log_and_print(f"Error creating table: {e}", logging.ERROR, always_print=True)
-
 
 def insert_or_update_book(conn, book):
     """ Insert or update a book in the table """
@@ -143,155 +139,147 @@ def insert_or_update_book(conn, book):
         log_and_print(f"Error inserting/updating book '{book['Title']}']: {e}", logging.ERROR, always_print=True)
         return False
 
-
-def fetch_audible_data(auth):
-    """ Fetch library and wishlist data from Audible """
+def fetch_audible_data():
+    """ Fetch library and wishlist data using audible-cli """
     try:
-        client = audible.Client(auth=auth)
+        # Ensure the config file and auth file are properly set up
+        config_dir = os.path.expanduser("~/.audible")
+        config_file = os.path.join(config_dir, "config.toml")
         
-        library = client.get(
-            "1.0/library",
-            num_results=1000,
-            response_groups="product_desc, product_attrs, contributors, media"
-        )
-        if DEBUG_RAW_RESPONSE:
-            with open('library_raw_response.json', 'w') as f:
-                json.dump(library, f)
-        log_and_print("Fetched library data", always_print=True)
-        
-        wishlist = client.get(
-            "1.0/wishlist",
-            num_results=50,
-            response_groups="product_desc, product_attrs, contributors, media"
-        )
-        if DEBUG_RAW_RESPONSE:
-            with open('wishlist_raw_response.json', 'w') as f:
-                json.dump(wishlist, f)
-        log_and_print("Fetched wishlist data", always_print=True)
-        
-        return library, wishlist
+        # Ensure the config directory exists
+        os.makedirs(config_dir, exist_ok=True)
+
+        # Check if the config file exists
+        if not os.path.exists(config_file):
+            error_message = (
+                "Config file not found. Please set up your Audible configuration using the audible-cli by running 'audible quickstart'."
+            )
+            log_and_print(error_message, logging.ERROR, always_print=True)
+            return None, None
+
+        # Profile name used in the configuration
+        profile_name = "primary"
+
+        library_command = ["audible", "-P", profile_name, "library", "list"]
+        wishlist_command = ["audible", "-P", profile_name, "wishlist", "list"]
+
+        library_result = subprocess.run(library_command, capture_output=True, text=True)
+        wishlist_result = subprocess.run(wishlist_command, capture_output=True, text=True)
+
+        if TEST_MODE:
+            log_and_print(f"Library command result: {library_result}", logging.DEBUG, always_print=True)
+            log_and_print(f"Wishlist command result: {wishlist_result}", logging.DEBUG, always_print=True)
+
+            # Save raw responses to files
+            with open("library_raw_response.json", "w") as f:
+                f.write(library_result.stdout)
+            with open("wishlist_raw_response.json", "w") as f:
+                f.write(wishlist_result.stdout)
+
+        if library_result.returncode != 0:
+            if "Provided profile not found in config" in library_result.stderr:
+                log_and_print(
+                    f"Profile '{profile_name}' not found in config. Please ensure you've run 'audible quickstart' and set up your profiles correctly.",
+                    logging.ERROR,
+                    always_print=True
+                )
+            else:
+                log_and_print(f"Error fetching library data: {library_result.stderr}", logging.ERROR, always_print=True)
+            return None, None
+
+        if wishlist_result.returncode != 0:
+            if "Provided profile not found in config" in wishlist_result.stderr:
+                log_and_print(
+                    f"Profile '{profile_name}' not found in config. Please ensure you've run 'audible quickstart' and set up your profiles correctly.",
+                    logging.ERROR,
+                    always_print=True
+                )
+            else:
+                log_and_print(f"Error fetching wishlist data: {wishlist_result.stderr}", logging.ERROR, always_print=True)
+            return None, None
+
+        library_output = library_result.stdout.strip()
+        wishlist_output = wishlist_result.stdout.strip()
+
+        if TEST_MODE:
+            log_and_print(f"Raw library output: {library_output}", logging.DEBUG, always_print=True)
+            log_and_print(f"Raw wishlist output: {wishlist_output}", logging.DEBUG, always_print=True)
+
+        if not library_output:
+            log_and_print("Library command returned no output", logging.ERROR, always_print=True)
+            return None, None
+
+        if not wishlist_output:
+            log_and_print("Wishlist command returned no output", logging.ERROR, always_print=True)
+            return None, None
+
+        # Parse the plain text output into a structured format
+        def parse_output(output):
+            books = []
+            for line in output.split('\n'):
+                parts = line.split(': ', 2)
+                if len(parts) == 3:
+                    asin, author, title = parts
+                    books.append({
+                        "ASIN": asin,
+                        "Author": author,
+                        "Title": title,
+                        "Description": "",
+                        "Length": "",
+                        "EPUB_Column": "",
+                        "Downloaded": False,
+                        "Cover_URL": "",
+                        "Finished": False,
+                        "Status": ""
+                    })
+            return books
+
+        library_data = parse_output(library_output)
+        wishlist_data = parse_output(wishlist_output)
+
+        log_and_print("Fetched library and wishlist data using audible-cli", always_print=True)
+        return library_data, wishlist_data
     except Exception as e:
-        log_and_print(f"Error fetching data from Audible: {e}", logging.ERROR, always_print=True)
+        log_and_print(f"Error fetching data using audible-cli: {e}", logging.ERROR, always_print=True)
         return None, None
 
 
 def parse_books(data, status, downloaded=False):
     """ Parse book data """
     books = []
-    key = 'items' if 'items' in data else 'products' if 'products' in data else None
-    if not key:
-        log_and_print(f"Expected key 'items' or 'products' not found in data: {data}", logging.ERROR, always_print=True)
+
+    if not isinstance(data, list):
+        log_and_print(f"Expected a list of books, but got: {data}", logging.ERROR, always_print=True)
         return books
 
-    for item in data[key]:
-        # Ensure authors are correctly fetched from 'authors' key if 'contributors' is missing
-        contributors = item.get("contributors", [])
-        if not contributors:
-            contributors = item.get("authors", [])
-        
-        author = ", ".join([contrib["name"] for contrib in contributors if contrib.get("role") == "Author" or "role" not in contrib])
-        
-        description = item.get("summary") or item.get("merchandising_summary", "No description available")
-        description = re.sub('<[^<]+?>', '', description)  # Remove HTML tags
-        
-        listening_status = item.get("listening_status")
-        finished = listening_status and listening_status.get("status", "") == "Finished"
-        
+    for item in data:
+        author = item.get("Author", "Unknown")
+        title = item.get("Title", "Unknown Title")
+        description = item.get("Description", "No description available")
+        length = item.get("Length", "Unknown")
+        cover_url = item.get("Cover_URL", None)
+        finished = item.get("Finished", False)
+
         book = {
-            "Author": author if author else "Unknown",
-            "Title": item["title"],
+            "Author": author,
+            "Title": title,
             "Description": description,
-            "Length": item.get("runtime_length_min", "Unknown"),
+            "Length": length,
             "EPUB_Column": "",  # Placeholder for EPUB reference
-            "Downloaded": False,  # Always set to False as per requirement
-            "Cover_URL": item.get("product_images", {}).get("500", None),  # Cover URL
+            "Downloaded": downloaded,  # Set Downloaded based on input parameter
+            "Cover_URL": cover_url,
             "Finished": finished,
             "Status": status
         }
         books.append(book)
     return books
 
-
-def custom_captcha_callback(captcha_url):
-    print(f"Please solve the CAPTCHA here: {captcha_url}")
-    solution = input("Enter CAPTCHA solution: ")
-    log_and_print(f"CAPTCHA solved with: {solution}")
-    return solution
-
-def custom_otp_callback():
-    otp_secret = os.getenv('OTP_SECRET')
-    if not otp_secret:
-        otp_code = input("Enter the OTP code sent to your device: ")
-    else:
-        otp = pyotp.TOTP(otp_secret)
-        otp_code = otp.now()
-    log_and_print(f"OTP code provided: {otp_code}")
-    return otp_code
-
-def custom_cvf_callback():
-    cvf_code = input("Enter the CVF code sent to your email or phone: ")
-    log_and_print(f"CVF code provided: {cvf_code}")
-    return cvf_code
-
-def custom_approval_callback():
-    print("Approval alert detected! Amazon has sent you an email.")
-    input("Please approve the email and press Enter to continue...")
-    log_and_print("Approval alert handled.")
-
-def authenticate(username, password, country_code):
-    if os.path.exists(AUTH_FILE):
-        # Load authentication data from file
-        try:
-            auth = audible.Authenticator.from_file(AUTH_FILE)
-            log_and_print("Authenticated with Audible using saved credentials", always_print=True)
-            return auth
-        except Exception as e:
-            log_and_print(f"Error loading authentication data: {e}", logging.ERROR, always_print=True)
-
-    # If authentication data is not available, perform login
-    try:
-        auth = audible.Authenticator.from_login(
-            username,
-            password,
-            locale=country_code,
-            captcha_callback=custom_captcha_callback,
-            otp_callback=custom_otp_callback,
-            cvf_callback=custom_cvf_callback,
-            approval_callback=custom_approval_callback
-        )
-        auth.to_file(AUTH_FILE)
-        log_and_print("Authenticated with Audible and saved credentials", always_print=True)
-        return auth
-    except audible.exceptions.AuthFlowError as e:
-        log_and_print(f"Authentication flow error: {e}", logging.ERROR, always_print=True)
-    except audible.exceptions.Unauthorized as e:
-        log_and_print(f"Unauthorized access: {e}", logging.ERROR, always_print=True)
-    except audible.exceptions.NoRefreshToken as e:
-        log_and_print(f"No refresh token available: {e}", logging.ERROR, always_print=True)
-    except Exception as e:
-        log_and_print(f"Unexpected error during authentication: {e}", logging.ERROR, always_print=True)
-
-    return None
-
 def main():
-    # Audible API credentials and setup
-    USERNAME = os.getenv('AUDIBLE_USERNAME')
-    PASSWORD = os.getenv('AUDIBLE_PASSWORD')
-    COUNTRY_CODE = os.getenv('AUDIBLE_COUNTRY_CODE', 'us')  # Default to 'us' if not set
-
-    if not USERNAME or not PASSWORD:
-        log_and_print("Audible credentials not found in environment variables", logging.ERROR, always_print=True)
-        return
-
-    auth = authenticate(USERNAME, PASSWORD, COUNTRY_CODE)
-    if auth is None:
-        return
-
     conn = create_connection(DATABASE)
     if conn is not None:
         create_table(conn)
         
-        library, wishlist = fetch_audible_data(auth)
+        library, wishlist = fetch_audible_data()
         
         books_added = 0
         books_updated = 0
@@ -326,11 +314,6 @@ def main():
         log_and_print(f"Script execution complete. {books_added} books added and {books_updated} books updated in the database.", always_print=True)
     else:
         log_and_print("Error! Cannot create the database connection.", logging.ERROR, always_print=True)
-
-
-
-
-
 
 if __name__ == '__main__':
     main()
