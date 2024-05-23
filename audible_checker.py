@@ -3,9 +3,11 @@ import sqlite3
 import logging
 from sqlite3 import Error
 from logging.handlers import RotatingFileHandler
+import audible
+import toml
+import asyncio
+import re
 import json
-import subprocess
-from unittest import result
 
 # Configure logging
 LOG_FILENAME = 'audible_checker.log'
@@ -45,6 +47,8 @@ def create_connection(db_file):
     """ Create a database connection to a SQLite database """
     conn = None
     try:
+        if not os.path.exists(db_file):
+            log_and_print(f"Database file '{db_file}' does not exist. Creating a new database file.", logging.INFO, always_print=True)
         conn = sqlite3.connect(db_file)
         log_and_print("Connected to SQLite database", always_print=True)
     except Error as e:
@@ -91,12 +95,12 @@ def insert_or_update_book(conn, book):
             if current_author == "Unknown" and book["Author"] != "Unknown":
                 needs_update = True
                 log_and_print(f"Author update needed for book '{book['Title']}' from 'Unknown' to '{book['Author']}'", logging.DEBUG)
-            if current_description == "No description available" and book["Description"] != "No description available":
+            if current_description in ["No description available", "", None] and book["Description"] not in ["No description available", "", None]:
                 needs_update = True
-                log_and_print(f"Description update needed for book '{book['Title']}' from 'No description available' to '{book['Description']}'", logging.DEBUG)
-            if not current_length and book["Length"]:
+                log_and_print(f"Description update needed for book '{book['Title']}' from '{current_description}' to '{book['Description']}'", logging.DEBUG)
+            if current_length in ["Unknown", "", None] and book["Length"] not in ["Unknown", "", None]:
                 needs_update = True
-                log_and_print(f"Length update needed for book '{book['Title']}' from '' to '{book['Length']}'", logging.DEBUG)
+                log_and_print(f"Length update needed for book '{book['Title']}' from '{current_length}' to '{book['Length']}'", logging.DEBUG)
             if not current_cover_url and book["Cover_URL"]:
                 needs_update = True
                 log_and_print(f"Cover URL update needed for book '{book['Title']}' from '' to '{book['Cover_URL']}'", logging.DEBUG)
@@ -141,183 +145,149 @@ def insert_or_update_book(conn, book):
         log_and_print(f"Error inserting/updating book '{book['Title']}']: {e}", logging.ERROR, always_print=True)
         return False
 
-def fetch_audible_data():
-    """ Fetch library and wishlist data using audible-cli """
-    try:
-        # Ensure the config file and auth file are properly set up
-        config_dir = os.path.expanduser("~/.audible")
-        config_file = os.path.join(config_dir, "config.toml")
-        
-        # Ensure the config directory exists
-        os.makedirs(config_dir, exist_ok=True)
+def strip_markdown(text):
+    """ Strip markdown tags from a text """
+    clean = re.compile('<.*?>')
+    return re.sub(clean, '', text)
 
-        # Check if the config file exists
-        if not os.path.exists(config_file):
-            error_message = (
-                "Config file not found. Please set up your Audible configuration using the audible-cli by running 'audible quickstart'."
+async def fetch_all_items(client, path, response_groups):
+    items = []
+    page = 1  # Start pagination from page 1
+    while True:
+        try:
+            params = {
+                "response_groups": response_groups,
+                "num_results": 50,
+                "page": page
+            }
+            response = await client.get(
+                path=path,
+                params=params
             )
-            log_and_print(error_message, logging.ERROR, always_print=True)
-            return None, None
+            if TEST_MODE:
+                filename = f"{path}_raw_response_page_{page}.json"
+                with open(filename, "w", encoding='utf-8') as f:
+                    json.dump(response, f, ensure_ascii=False, indent=4)
 
-        # Profile name used in the configuration
-        profile_name = "primary"
+            if not response or 'items' not in response or not response['items']:
+                break
 
-        library_command = ["audible", "-P", profile_name, "library", "list"]
-        wishlist_command = ["audible", "-P", profile_name, "wishlist", "list"]
+            items.extend(response['items'])
+            if len(response['items']) < 50:
+                break
+            page += 1
+        except Exception as e:
+            log_and_print(f"Error fetching page {page} from {path}: {e}", logging.ERROR, always_print=True)
+            log_and_print(f"Request params: {params}", logging.ERROR, always_print=True)
+            if 'response' in locals():
+                log_and_print(f"Response content: {response}", logging.ERROR, always_print=True)
+                if TEST_MODE:
+                    filename = f"{path}_error_response_page_{page}.json"
+                    with open(filename, "w", encoding='utf-8') as f:
+                        json.dump(response, f, ensure_ascii=False, indent=4)
+            break
+    return items
 
-        library_result = subprocess.run(library_command, capture_output=True, text=True)
-        wishlist_result = subprocess.run(wishlist_command, capture_output=True, text=True)
+async def fetch_audible_details(client):
+    """ Fetch audiobook details asynchronously using the Audible API """
+    try:
+        library_items = await fetch_all_items(
+            client, "library",
+            "contributors, media, price, reviews, product_attrs, "
+            "product_extended_attrs, product_desc, product_plan_details, "
+            "product_plans, rating, sample, sku, series, ws4v, origin, "
+            "relationships, review_attrs, categories, badge_types, "
+            "category_ladders, claim_code_url, is_downloaded, pdf_url, "
+            "is_returnable, origin_asin, percent_complete, provided_review"
+        )
 
-        if TEST_MODE:
-            log_and_print(f"Library command result: {library_result}", logging.DEBUG, always_print=True)
-            log_and_print(f"Wishlist command result: {wishlist_result}", logging.DEBUG, always_print=True)
+        wishlist_items = await fetch_all_items(
+            client, "wishlist",
+            "contributors, media, product_attrs, product_desc"
+        )
 
-            # Save raw responses to files
-            with open("library_raw_response.json", "w") as f:
-                f.write(library_result.stdout)
-            with open("wishlist_raw_response.json", "w") as f:
-                f.write(wishlist_result.stdout)
-
-        if library_result.returncode != 0:
-            if "Provided profile not found in config" in library_result.stderr:
-                log_and_print(
-                    f"Profile '{profile_name}' not found in config. Please ensure you've run 'audible quickstart' and set up your profiles correctly.",
-                    logging.ERROR,
-                    always_print=True
-                )
-            else:
-                log_and_print(f"Error fetching library data: {library_result.stderr}", logging.ERROR, always_print=True)
-            return None, None
-
-        if wishlist_result.returncode != 0:
-            if "Provided profile not found in config" in wishlist_result.stderr:
-                log_and_print(
-                    f"Profile '{profile_name}' not found in config. Please ensure you've run 'audible quickstart' and set up your profiles correctly.",
-                    logging.ERROR,
-                    always_print=True
-                )
-            else:
-                log_and_print(f"Error fetching wishlist data: {wishlist_result.stderr}", logging.ERROR, always_print=True)
-            return None, None
-
-        library_output = library_result.stdout.strip()
-        wishlist_output = wishlist_result.stdout.strip()
-
-        if TEST_MODE:
-            log_and_print(f"Raw library output: {library_output}", logging.DEBUG, always_print=True)
-            log_and_print(f"Raw wishlist output: {wishlist_output}", logging.DEBUG, always_print=True)
-
-        if not library_output:
-            log_and_print("Library command returned no output", logging.ERROR, always_print=True)
-            return None, None
-
-        if not wishlist_output:
-            log_and_print("Wishlist command returned no output", logging.ERROR, always_print=True)
-            return None, None
-
-        # Parse the plain text output into a structured format
-        def parse_output(output):
-            books = []
-            for line in output.split('\n'):
-                parts = line.split(': ', 2)
-                if len(parts) == 3:
-                    asin, author, title = parts
-                    books.append({
+        return library_items + wishlist_items
+    except Exception as e:
+        log_and_print(f"Error fetching details: {e}", logging.ERROR, always_print=True)
+        return None
+    
+async def main_async(auth):
+    async with audible.AsyncClient(auth=auth) as client:
+        conn = create_connection(DATABASE)
+        if conn is not None:
+            try:
+                create_table(conn)
+                
+                # Fetch all details in a single request
+                all_details = await fetch_audible_details(client)
+                if not all_details:
+                    log_and_print("Failed to fetch details from Audible", logging.ERROR, always_print=True)
+                    return
+                
+                for book_details in all_details:
+                    asin = book_details.get('asin', 'Unknown ASIN')
+                    author = ', '.join([author['name'] for author in book_details.get('authors', [])]) if book_details.get('authors') else 'Unknown'
+                    title = book_details.get('title', 'Unknown Title')
+                    description = strip_markdown(book_details.get('merchandising_summary', 'No description available'))
+                    length = str(book_details.get('runtime_length_min', 'Unknown'))
+                    cover_url = book_details.get('images', {}).get('cover', {}).get('sizes', {}).get('600', '') if book_details.get('images') else ''
+                    finished = book_details.get('listening_status') == 'Completed'
+                    status = 'Library' if book_details.get('is_downloaded') else 'Wishlist'
+                    
+                    book = {
                         "ASIN": asin,
                         "Author": author,
                         "Title": title,
-                        "Description": "",
-                        "Length": "",
+                        "Description": description,
+                        "Length": length,
                         "EPUB_Column": "",
                         "Downloaded": False,
-                        "Cover_URL": "",
-                        "Finished": False,
-                        "Status": ""
-                    })
-            return books
+                        "Cover_URL": cover_url,
+                        "Finished": finished,
+                        "Status": status
+                    }
+                    insert_or_update_book(conn, book)
+                
+                # Update books with missing authors
+                cur = conn.cursor()
+                cur.execute(f"SELECT ASIN, Author FROM {TABLE_NAME} WHERE Author = 'Unknown'")
+                books_missing_authors = cur.fetchall()
+                
+                for asin, _ in books_missing_authors:
+                    book_details = await fetch_audible_details(client, asin)
+                    if book_details:
+                        author = ', '.join([author['name'] for author in book_details.get('authors', [])]) if book_details.get('authors') else 'Unknown'
+                        cur.execute(f"UPDATE {TABLE_NAME} SET Author = ? WHERE ASIN = ?", (author, asin))
+                        conn.commit()
 
-        library_data = parse_output(library_output)
-        wishlist_data = parse_output(wishlist_output)
-
-        log_and_print("Fetched library and wishlist data using audible-cli", always_print=True)
-        return library_data, wishlist_data
-    except Exception as e:
-        log_and_print(f"Error fetching data using audible-cli: {e}", logging.ERROR, always_print=True)
-        return None, None
-
-
-def parse_books(data, status, downloaded=False):
-    """ Parse book data """
-    books = []
-
-    if not isinstance(data, list):
-        log_and_print(f"Expected a list of books, but got: {data}", logging.ERROR, always_print=True)
-        return books
-
-    for item in data:
-        asin = item.get("ASIN", "Unknown ASIN")
-        author = item.get("Author", "Unknown")
-        title = item.get("Title", "Unknown Title")
-        description = item.get("Description", "No description available")
-        length = item.get("Length", "Unknown")
-        cover_url = item.get("Cover_URL", None)
-        finished = item.get("Finished", False)
-
-        book = {
-            "ASIN": asin,
-            "Author": author,
-            "Title": title,
-            "Description": description,
-            "Length": length,
-            "EPUB_Column": "",  # Placeholder for EPUB reference
-            "Downloaded": downloaded,  # Set Downloaded based on input parameter
-            "Cover_URL": cover_url,
-            "Finished": finished,
-            "Status": status
-        }
-        books.append(book)
-    return books
-
-def main():
-    conn = create_connection(DATABASE)
-    if conn is not None:
-        create_table(conn)
-        
-        library, wishlist = fetch_audible_data()
-        
-        books_added = 0
-        books_updated = 0
-        wishlist_items_added = 0  # Counter for wishlist items added
-
-        library_titles = set()
-        
-        if library:
-            library_books = parse_books(library, status="Library", downloaded=True)
-            for book in library_books:
-                library_titles.add(book["Title"])
-                result = insert_or_update_book(conn, book)
-                if result is True:
-                    books_added += 1
-                elif result is False:
-                    books_updated += 1
-        
-        if wishlist:
-            wishlist_books = parse_books(wishlist, status="Wishlist", downloaded=False)
-            for book in wishlist_books:
-                if book["Title"] not in library_titles:
-                    result = insert_or_update_book(conn, book)
-                    if result is True:
-                        books_added += 1
-                        wishlist_items_added += 1  # Increment wishlist items added counter
-                    elif result is False:
-                        books_updated += 1
-        
-        conn.close()
-        log_and_print("Database connection closed", always_print=True)
-        log_and_print(f"Number of wishlist items added: {wishlist_items_added}", always_print=True)  # Log wishlist items added
-        log_and_print(f"Script execution complete. {books_added} books added and {books_updated} books updated in the database.", always_print=True)
-    else:
-        log_and_print("Error! Cannot create the database connection.", logging.ERROR, always_print=True)
+            except Error as e:
+                log_and_print(f"Error querying database: {e}", logging.ERROR, always_print=True)
+            finally:
+                conn.close()
+                log_and_print("Database connection closed", logging.INFO, always_print=True)
+        else:
+            log_and_print("Error! Cannot create the database connection.", logging.ERROR, always_print=True)
 
 if __name__ == '__main__':
-    main()
+    try:
+        config_dir = os.environ.get('AUDIBLE_CONFIG_DIR', os.path.expanduser('~/.audible'))
+        config_path = os.path.join(config_dir, 'config.toml')
+
+        if not os.path.exists(config_path):
+            raise FileNotFoundError("Audible config file not found.")
+
+        config = toml.load(config_path)
+        profile_name = config['APP']['primary_profile']
+        profile = config['profile'][profile_name]
+        auth_file_path = os.path.join(config_dir, profile['auth_file'])
+
+        if not os.path.exists(auth_file_path):
+            raise FileNotFoundError("Audible auth file not found.")
+
+        auth = audible.Authenticator.from_file(auth_file_path)
+
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main_async(auth))
+
+    except Exception as e:
+        log_and_print(f"Authentication error: {e}", logging.ERROR, always_print=True)
