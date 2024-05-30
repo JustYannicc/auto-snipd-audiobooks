@@ -9,9 +9,8 @@ import asyncio
 import re
 import json
 
-#FIXME: The finished tag is not being set correctly. It is always false.
+
 #FIXME: the wishlist is not being fetched correctly. The wishlist is not being fetched at all.
-#FIXME: The cover url is not being fetched 
 
 # Configure logging
 LOG_FILENAME = 'audible_checker.log'
@@ -31,7 +30,7 @@ logger.addHandler(handler)
 # Define database and table name
 DATABASE = 'audible_library.db'
 TABLE_NAME = 'books'
-TEST_MODE = False  # Change to True for more verbosity
+TEST_MODE = True  # Change to True for more verbosity
 
 def log_and_print(message, level=logging.INFO, always_print=False):
     if TEST_MODE or always_print:
@@ -86,10 +85,10 @@ def insert_or_update_book(conn, book):
     """ Insert or update a book in the table """
     try:
         cur = conn.cursor()
-        cur.execute(f"SELECT Author, Description, Length, Cover_URL, Title, Status FROM {TABLE_NAME} WHERE ASIN = ?", (book["ASIN"],))
+        cur.execute(f"SELECT Author, Description, Length, Cover_URL, Title, Status, Finished FROM {TABLE_NAME} WHERE ASIN = ?", (book["ASIN"],))
         result = cur.fetchone()
         if result:
-            current_author, current_description, current_length, current_cover_url, title, status = result
+            current_author, current_description, current_length, current_cover_url, title, status, current_finished = result
             # Determine if an update is needed
             needs_update = False
 
@@ -108,6 +107,9 @@ def insert_or_update_book(conn, book):
             if not current_cover_url and book["Cover_URL"]:
                 needs_update = True
                 log_and_print(f"Cover URL update needed for book '{book['Title']}' from '' to '{book['Cover_URL']}'", logging.DEBUG)
+            if current_finished != book["Finished"]:
+                needs_update = True
+                log_and_print(f"Finished status update needed for book '{book['Title']}'", logging.DEBUG)
 
             if needs_update:
                 cur.execute(f'''
@@ -203,12 +205,7 @@ async def fetch_audible_details(client):
     try:
         library_items = await fetch_all_items(
             client, "library",
-            "contributors, media, price, reviews, product_attrs, "
-            "product_extended_attrs, product_desc, product_plan_details, "
-            "product_plans, rating, sample, sku, series, ws4v, origin, "
-            "relationships, review_attrs, categories, badge_types, "
-            "category_ladders, claim_code_url, is_downloaded, pdf_url, "
-            "is_returnable, origin_asin, percent_complete, provided_review"
+            "contributors, customer_rights, media, price, product_attrs, product_desc, product_details, product_extended_attrs, product_plan_details, product_plans, rating, sample, sku, series, reviews, ws4v, origin, relationships, review_attrs, categories, badge_types, category_ladders, claim_code_url, in_wishlist, is_archived, is_downloaded, is_finished, is_playable, is_removable, is_returnable, is_visible, listening_status, order_details, origin_asin, pdf_url, percent_complete, periodicals, provided_review"
         )
 
         wishlist_items = await fetch_all_items(
@@ -221,7 +218,6 @@ async def fetch_audible_details(client):
         log_and_print(f"Error fetching details: {e}", logging.ERROR, always_print=True)
         return None
 
-    
 async def main_async(auth):
     async with audible.AsyncClient(auth=auth) as client:
         conn = create_connection(DATABASE)
@@ -242,7 +238,7 @@ async def main_async(auth):
                     description = strip_markdown(book_details.get('merchandising_summary', 'No description available'))
                     length = str(book_details.get('runtime_length_min', 'Unknown'))
                     cover_url = book_details.get('product_images', {}).get('500', '') if book_details.get('product_images') else ''
-                    finished = book_details.get('listening_status') == 'Completed'
+                    finished = book_details.get('is_finished', False)
                     status = 'Library' if book_details.get('is_downloaded') else 'Wishlist'
                     
                     book = {
