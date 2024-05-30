@@ -86,7 +86,6 @@ def insert_or_update_book(conn, book):
         result = cur.fetchone()
         if result:
             current_author, current_description, current_length, current_cover_url, title, status, current_finished = result
-            # Determine if an update is needed
             needs_update = False
 
             if status == "Wishlist" and book["Status"] == "Library":
@@ -124,6 +123,8 @@ def insert_or_update_book(conn, book):
                       book["ASIN"]))
                 conn.commit()
                 log_and_print(f"Book '{book['Title']}' updated in database", logging.INFO)
+                if TEST_MODE:
+                    log_and_print(f"Updated book details: {book}", logging.DEBUG)
                 return False  # Update occurred
             else:
                 return None  # No update needed
@@ -143,6 +144,8 @@ def insert_or_update_book(conn, book):
                   book["Status"]))
             conn.commit()
             log_and_print(f"Book '{book['Title']}' added to database", logging.INFO)
+            if TEST_MODE:
+                log_and_print(f"Added book details: {book}", logging.DEBUG)
             return True  # Insert occurred
     except Error as e:
         log_and_print(f"Error inserting/updating book '{book['Title']}']: {e}", logging.ERROR, always_print=True)
@@ -209,6 +212,8 @@ async def fetch_all_items(client, path, response_groups):
 
 async def process_wishlist_items(conn, wishlist_items):
     log_and_print("Processing wishlist items...", logging.DEBUG, always_print=True)
+    added_books = 0
+    updated_books = 0
     for book_details in wishlist_items:
         asin = book_details.get('asin', 'Unknown ASIN')
         author = ', '.join([author['name'] for author in book_details.get('authors', [])]) if book_details.get('authors') else 'Unknown'
@@ -231,8 +236,17 @@ async def process_wishlist_items(conn, wishlist_items):
             "Finished": finished,
             "Status": status
         }
-        log_and_print(f"Inserting/updating wishlist book: {book}", logging.DEBUG, always_print=True)
-        insert_or_update_book(conn, book)
+        if TEST_MODE:
+            log_and_print(f"Inserting/updating wishlist book: {book}", logging.DEBUG, always_print=True)
+        else:
+            log_and_print(f"Inserting/updating wishlist book: {book['Title']}", logging.DEBUG, always_print=False)
+        result = insert_or_update_book(conn, book)
+        if result is True:
+            added_books += 1
+        elif result is False:
+            updated_books += 1
+    print(f"{added_books} wishlist books added.")
+    print(f"{updated_books} wishlist books updated.")
 
 async def fetch_audible_details(client):
     """ Fetch audiobook details asynchronously using the Audible API """
@@ -274,6 +288,8 @@ async def main_async(auth):
                 
                 # Process library items
                 log_and_print("Processing library items...", logging.DEBUG, always_print=True)
+                added_books = 0
+                updated_books = 0
                 for book_details in library_items:
                     asin = book_details.get('asin', 'Unknown ASIN')
                     author = ', '.join([author['name'] for author in book_details.get('authors', [])]) if book_details.get('authors') else 'Unknown'
@@ -296,8 +312,17 @@ async def main_async(auth):
                         "Finished": finished,
                         "Status": status
                     }
-                    log_and_print(f"Inserting/updating library book: {book}", logging.DEBUG, always_print=True)
-                    insert_or_update_book(conn, book)
+                    if TEST_MODE:
+                        log_and_print(f"Inserting/updating library book: {book}", logging.DEBUG, always_print=True)
+                    else:
+                        log_and_print(f"Inserting/updating library book: {book['Title']}", logging.DEBUG, always_print=False)
+                    result = insert_or_update_book(conn, book)
+                    if result is True:
+                        added_books += 1
+                    elif result is False:
+                        updated_books += 1
+                print(f"{added_books} library books added.")
+                print(f"{updated_books} library books updated.")
                 
                 # Process wishlist items
                 await process_wishlist_items(conn, wishlist_items)
