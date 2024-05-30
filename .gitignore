@@ -6,3 +6,4 @@ audible_auth.json
 library_raw_response.json
 wishlist_raw_response.json
 .gitmodules
+.DS_Store

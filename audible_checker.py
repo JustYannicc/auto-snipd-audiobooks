@@ -9,9 +9,6 @@ import asyncio
 import re
 import json
 
-
-#FIXME: the wishlist is not being fetched correctly. The wishlist is not being fetched at all.
-
 # Configure logging
 LOG_FILENAME = 'audible_checker.log'
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
@@ -30,7 +27,7 @@ logger.addHandler(handler)
 # Define database and table name
 DATABASE = 'audible_library.db'
 TABLE_NAME = 'books'
-TEST_MODE = True  # Change to True for more verbosity
+TEST_MODE = False  # Change to True for more verbosity
 
 def log_and_print(message, level=logging.INFO, always_print=False):
     if TEST_MODE or always_print:
@@ -158,7 +155,7 @@ def strip_markdown(text):
 
 async def fetch_all_items(client, path, response_groups):
     items = []
-    page = 1  # Start pagination from page 1
+    page = 1 if path == "library" else 0  # Start pagination from page 1 for library, 0 for wishlist
     response_data = []  # Store all response data
     while True:
         try:
@@ -174,12 +171,22 @@ async def fetch_all_items(client, path, response_groups):
 
             response_data.append(response)  # Collect response for potential saving
 
-            if not response or 'items' not in response or not response['items']:
+            if path == "library":
+                if not response or 'items' not in response or not response['items']:
+                    break
+                items.extend(response['items'])
+                if len(response['items']) < 50:
+                    break
+            elif path == "wishlist":
+                if not response or 'products' not in response or not response['products']:
+                    break
+                items.extend(response['products'])
+                if len(response['products']) < 50:
+                    break
+            else:
+                log_and_print(f"Unknown path: {path}", logging.ERROR, always_print=True)
                 break
 
-            items.extend(response['items'])
-            if len(response['items']) < 50:
-                break
             page += 1
         except Exception as e:
             log_and_print(f"Error fetching page {page} from {path}: {e}", logging.ERROR, always_print=True)
@@ -200,25 +207,59 @@ async def fetch_all_items(client, path, response_groups):
     
     return items
 
+async def process_wishlist_items(conn, wishlist_items):
+    log_and_print("Processing wishlist items...", logging.DEBUG, always_print=True)
+    for book_details in wishlist_items:
+        asin = book_details.get('asin', 'Unknown ASIN')
+        author = ', '.join([author['name'] for author in book_details.get('authors', [])]) if book_details.get('authors') else 'Unknown'
+        title = book_details.get('title', 'Unknown Title')
+        description = strip_markdown(book_details.get('merchandising_summary', 'No description available'))
+        length = str(book_details.get('runtime_length_min', 'Unknown'))
+        cover_url = book_details.get('product_images', {}).get('500', '') if book_details.get('product_images') else ''
+        finished = False
+        status = 'Wishlist'
+        
+        book = {
+            "ASIN": asin,
+            "Author": author,
+            "Title": title,
+            "Description": description,
+            "Length": length,
+            "EPUB_Column": "",
+            "Downloaded": False,
+            "Cover_URL": cover_url,
+            "Finished": finished,
+            "Status": status
+        }
+        log_and_print(f"Inserting/updating wishlist book: {book}", logging.DEBUG, always_print=True)
+        insert_or_update_book(conn, book)
+
 async def fetch_audible_details(client):
     """ Fetch audiobook details asynchronously using the Audible API """
     try:
+        log_and_print("Fetching library items...", logging.DEBUG, always_print=True)
         library_items = await fetch_all_items(
             client, "library",
             "contributors, customer_rights, media, price, product_attrs, product_desc, product_details, product_extended_attrs, product_plan_details, product_plans, rating, sample, sku, series, reviews, ws4v, origin, relationships, review_attrs, categories, badge_types, category_ladders, claim_code_url, in_wishlist, is_archived, is_downloaded, is_finished, is_playable, is_removable, is_returnable, is_visible, listening_status, order_details, origin_asin, pdf_url, percent_complete, periodicals, provided_review"
         )
 
+        log_and_print("Fetching wishlist items...", logging.DEBUG, always_print=True)
         wishlist_items = await fetch_all_items(
             client, "wishlist",
             "contributors, media, product_attrs, product_desc"
         )
 
-        return library_items + wishlist_items
+        # Log the fetched items for debugging purposes
+        log_and_print(f"Fetched {len(library_items)} library items", logging.DEBUG, always_print=True)
+        log_and_print(f"Fetched {len(wishlist_items)} wishlist items", logging.DEBUG, always_print=True)
+        
+        return library_items, wishlist_items
     except Exception as e:
         log_and_print(f"Error fetching details: {e}", logging.ERROR, always_print=True)
-        return None
+        return None, None
 
 async def main_async(auth):
+    log_and_print("Starting main_async function", logging.DEBUG, always_print=True)
     async with audible.AsyncClient(auth=auth) as client:
         conn = create_connection(DATABASE)
         if conn is not None:
@@ -226,12 +267,14 @@ async def main_async(auth):
                 create_table(conn)
                 
                 # Fetch all details in a single request
-                all_details = await fetch_audible_details(client)
-                if not all_details:
+                library_items, wishlist_items = await fetch_audible_details(client)
+                if not library_items and not wishlist_items:
                     log_and_print("Failed to fetch details from Audible", logging.ERROR, always_print=True)
                     return
                 
-                for book_details in all_details:
+                # Process library items
+                log_and_print("Processing library items...", logging.DEBUG, always_print=True)
+                for book_details in library_items:
                     asin = book_details.get('asin', 'Unknown ASIN')
                     author = ', '.join([author['name'] for author in book_details.get('authors', [])]) if book_details.get('authors') else 'Unknown'
                     title = book_details.get('title', 'Unknown Title')
@@ -253,9 +296,14 @@ async def main_async(auth):
                         "Finished": finished,
                         "Status": status
                     }
+                    log_and_print(f"Inserting/updating library book: {book}", logging.DEBUG, always_print=True)
                     insert_or_update_book(conn, book)
                 
+                # Process wishlist items
+                await process_wishlist_items(conn, wishlist_items)
+                
                 # Update books with missing authors or cover URLs
+                log_and_print("Updating books with missing authors or cover URLs...", logging.DEBUG, always_print=True)
                 cur = conn.cursor()
                 cur.execute(f"SELECT ASIN, Author, Cover_URL FROM {TABLE_NAME} WHERE Author = 'Unknown' OR Cover_URL = ''")
                 books_missing_data = cur.fetchall()
@@ -296,6 +344,7 @@ if __name__ == '__main__':
 
         auth = audible.Authenticator.from_file(auth_file_path)
 
+        log_and_print("Starting event loop...", logging.DEBUG, always_print=True)
         loop = asyncio.get_event_loop()
         loop.run_until_complete(main_async(auth))
 
