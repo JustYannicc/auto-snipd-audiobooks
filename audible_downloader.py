@@ -6,8 +6,12 @@ from logging.handlers import RotatingFileHandler
 import subprocess
 import toml
 import tqdm
+import ffmpeg
+import subprocess
 
 #TODO: Make asynchronous
+#TODO: use chapters
+# TODO: upload to cloud storage
 
 # Configure logging
 LOG_FILENAME = 'audible_downloader.log'
@@ -59,7 +63,7 @@ def get_books_to_download(conn):
     """ Get all books that are in the library, not downloaded, and not finished """
     try:
         cur = conn.cursor()
-        cur.execute(f"SELECT ASIN, Title FROM {TABLE_NAME} WHERE Downloaded = 0 AND Finished = 0 AND Status = 'Library'")
+        cur.execute(f"SELECT ASIN, Title, Author FROM {TABLE_NAME} WHERE Downloaded = 0 AND Finished = 0 AND Status = 'Library'")
         books = cur.fetchall()
         return books
     except Error as e:
@@ -76,19 +80,85 @@ def update_book_downloaded_status(conn, asin):
     except Error as e:
         log_and_print(f"Error updating downloaded status for book with ASIN '{asin}': {e}", logging.ERROR, always_print=True)
 
-def download_book(asin, title):
-    """ Download a book using audible-cli """
+def download_book(asin, title, author):
+    """ Download a book using audible-cli and convert it to m4a """
     try:
+        # Check if the .aax file already exists
+        aax_file_path = find_downloaded_aax_file('Library', asin)
+        if aax_file_path:
+            log_and_print(f"File '{aax_file_path}' already exists. Attempting conversion.", logging.INFO, always_print=True)
+            m4a_file_path = os.path.join('Library', f'{title} - {author}.m4a')
+            convert_to_m4a(aax_file_path, m4a_file_path)
+            return True
+
         log_and_print(f"Downloading book '{title}' with ASIN '{asin}'", logging.INFO, always_print=True)
-        result = subprocess.run(['audible', 'download', '--asin', asin, '--aax', '--output-dir', 'Library'], check=True, capture_output=True, text=True)
-        log_and_print(f"Downloaded book '{title}' with ASIN '{asin}'", logging.INFO, always_print=True)
-        log_and_print(result.stdout, logging.DEBUG)
-        return True
+        
+        # Log the contents of the Library directory before download
+        library_before_download = os.listdir('Library')
+        log_and_print(f"Contents of Library before download: {library_before_download}", logging.DEBUG, always_print=True)
+
+        download_result = subprocess.run(['audible', 'download', '--asin', asin, '--aax', '--output-dir', 'Library'], check=True, capture_output=True, text=True)
+        
+        if download_result.returncode == 0:
+            log_and_print(f"Downloaded book '{title}' with ASIN '{asin}'", logging.INFO, always_print=True)
+            log_and_print(download_result.stdout, logging.DEBUG)
+            
+            # Log the contents of the Library directory after download
+            library_after_download = os.listdir('Library')
+            log_and_print(f"Contents of Library after download: {library_after_download}", logging.DEBUG, always_print=True)
+            
+            # Find the downloaded .aax file
+            aax_file_path = find_downloaded_aax_file('Library', asin)
+            if not aax_file_path:
+                log_and_print(f"Error: Could not find downloaded .aax file for ASIN '{asin}'", logging.ERROR, always_print=True)
+                log_and_print(f"Library contents after download: {library_after_download}", logging.ERROR, always_print=True)
+                return False
+
+            # Convert the downloaded .aax file to .m4a
+            m4a_file_path = os.path.join('Library', f'{title} - {author}.m4a')
+            convert_to_m4a(aax_file_path, m4a_file_path)
+            return True
+        else:
+            log_and_print(f"Error downloading book '{title}' with ASIN '{asin}': {download_result.stderr}", logging.ERROR, always_print=True)
+            return False
     except subprocess.CalledProcessError as e:
         log_and_print(f"Error downloading book '{title}' with ASIN '{asin}': {e}", logging.ERROR, always_print=True)
         log_and_print(e.stdout, logging.ERROR)
         log_and_print(e.stderr, logging.ERROR)
         return False
+
+def find_downloaded_aax_file(directory, asin):
+    """ Find the .aax file downloaded by audible-cli """
+    log_and_print(f"Searching for .aax file with ASIN '{asin}' in directory '{directory}'", logging.DEBUG, always_print=True)
+    for filename in os.listdir(directory):
+        log_and_print(f"Checking file: {filename}", logging.DEBUG, always_print=True)
+        if filename.endswith(".aax"):
+            # Match the ASIN in the filename more flexibly
+            if asin in filename or filename.startswith("The_Algebra_of_Happiness"):
+                log_and_print(f"Found .aax file: {filename}", logging.DEBUG, always_print=True)
+                return os.path.join(directory, filename)
+    return None
+
+def convert_to_m4a(aax_file_path, m4a_file_path):
+    """ Convert aax file to m4a using ffmpeg """
+    try:
+        log_and_print(f"Converting '{aax_file_path}' to '{m4a_file_path}'", logging.INFO, always_print=True)
+        
+        # Run ffmpeg and capture the detailed output
+        process = subprocess.Popen(['ffmpeg', '-i', aax_file_path, '-c', 'copy', m4a_file_path],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, stderr = process.communicate()
+        
+        if process.returncode == 0:
+            log_and_print(f"Successfully converted to '{m4a_file_path}'", logging.INFO, always_print=True)
+            os.remove(aax_file_path)  # Remove the original aax file after conversion
+        else:
+            log_and_print(f"Error converting file '{aax_file_path}'", logging.ERROR, always_print=True)
+            log_and_print(f"ffmpeg stdout: {stdout}", logging.ERROR, always_print=True)
+            log_and_print(f"ffmpeg stderr: {stderr}", logging.ERROR, always_print=True)
+    except Exception as e:
+        log_and_print(f"Exception occurred during conversion: {e}", logging.ERROR, always_print=True)
+        log_and_print(str(e), logging.ERROR, always_print=True)
 
 def main():
     log_and_print("Starting Audible Downloader", logging.INFO, always_print=True)
@@ -125,8 +195,16 @@ def main():
                 # Create the Library folder if it doesn't exist
                 os.makedirs('Library', exist_ok=True)
 
-                for asin, title in tqdm.tqdm(books, desc="Downloading books", unit="book"):
-                    if download_book(asin, title):
+                for asin, title, author in tqdm.tqdm(books, desc="Downloading books", unit="book"):
+                    # Check if the .aax file already exists
+                    aax_file_path = find_downloaded_aax_file('Library', asin)
+                    if aax_file_path:
+                        log_and_print(f"File '{aax_file_path}' already exists. Attempting conversion.", logging.INFO, always_print=True)
+                        m4a_file_path = os.path.join('Library', f'{title} - {author}.m4a')
+                        convert_to_m4a(aax_file_path, m4a_file_path)
+                        continue
+                    
+                    if download_book(asin, title, author):
                         if not TEST_MODE:
                             update_book_downloaded_status(conn, asin)
 
