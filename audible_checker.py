@@ -68,6 +68,7 @@ def create_table(conn):
             Length TEXT,
             EPUB_Column TEXT,
             Downloaded BOOLEAN DEFAULT 0,
+            Podcast_Description TEXT,
             Cover_URL TEXT,
             Finished BOOLEAN DEFAULT 0,
             Status TEXT
