@@ -7,3 +7,5 @@ library_raw_response.json
 wishlist_raw_response.json
 .gitmodules
 .DS_Store
+audible_downloader.log
+Library
