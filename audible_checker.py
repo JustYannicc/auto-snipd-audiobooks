@@ -31,7 +31,7 @@ logger.addHandler(handler)
 # Define database and table name
 DATABASE = 'audible_library.db'
 TABLE_NAME = 'books'
-TEST_MODE = True  # Change to True for more verbosity
+TEST_MODE = False  # Change to True for more verbosity
 
 def log_and_print(message, level=logging.INFO, always_print=False):
     if TEST_MODE or always_print:
@@ -241,7 +241,7 @@ async def main_async(auth):
                     title = book_details.get('title', 'Unknown Title')
                     description = strip_markdown(book_details.get('merchandising_summary', 'No description available'))
                     length = str(book_details.get('runtime_length_min', 'Unknown'))
-                    cover_url = book_details.get('images', {}).get('cover', {}).get('sizes', {}).get('600', '') if book_details.get('images') else ''
+                    cover_url = book_details.get('product_images', {}).get('500', '') if book_details.get('product_images') else ''
                     finished = book_details.get('listening_status') == 'Completed'
                     status = 'Library' if book_details.get('is_downloaded') else 'Wishlist'
                     
@@ -259,16 +259,19 @@ async def main_async(auth):
                     }
                     insert_or_update_book(conn, book)
                 
-                # Update books with missing authors
+                # Update books with missing authors or cover URLs
                 cur = conn.cursor()
-                cur.execute(f"SELECT ASIN, Author FROM {TABLE_NAME} WHERE Author = 'Unknown'")
-                books_missing_authors = cur.fetchall()
+                cur.execute(f"SELECT ASIN, Author, Cover_URL FROM {TABLE_NAME} WHERE Author = 'Unknown' OR Cover_URL = ''")
+                books_missing_data = cur.fetchall()
                 
-                for asin, _ in books_missing_authors:
-                    book_details = await fetch_audible_details(client, asin)
+                for asin, current_author, current_cover_url in books_missing_data:
+                    book_details = await fetch_all_items(client, f"products/{asin}", "contributors, media, product_images")
                     if book_details:
+                        book_details = book_details[0]  # Assuming fetch_all_items returns a list
                         author = ', '.join([author['name'] for author in book_details.get('authors', [])]) if book_details.get('authors') else 'Unknown'
-                        cur.execute(f"UPDATE {TABLE_NAME} SET Author = ? WHERE ASIN = ?", (author, asin))
+                        cover_url = book_details.get('product_images', {}).get('500', '') if book_details.get('product_images') else ''
+                        
+                        cur.execute(f"UPDATE {TABLE_NAME} SET Author = ?, Cover_URL = ? WHERE ASIN = ?", (author, cover_url, asin))
                         conn.commit()
 
             except Error as e:
