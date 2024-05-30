@@ -9,6 +9,10 @@ import asyncio
 import re
 import json
 
+#FIXME: dont itterate the raw output file names. just name them wishlist_raw_response.json and library_raw_response.json and overwrite them if there is new data. 
+#FIXME: The finished tag is not being set correctly. It is always false.
+#FIXME: the wishlist is not being fetched correctly. The wishlist is not being fetched at all.
+
 # Configure logging
 LOG_FILENAME = 'audible_checker.log'
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
@@ -165,7 +169,7 @@ async def fetch_all_items(client, path, response_groups):
                 params=params
             )
             if TEST_MODE:
-                filename = f"{path}_raw_response_page_{page}.json"
+                filename = f"{path}_raw_response.json"
                 with open(filename, "w", encoding='utf-8') as f:
                     json.dump(response, f, ensure_ascii=False, indent=4)
 
@@ -182,7 +186,7 @@ async def fetch_all_items(client, path, response_groups):
             if 'response' in locals():
                 log_and_print(f"Response content: {response}", logging.ERROR, always_print=True)
                 if TEST_MODE:
-                    filename = f"{path}_error_response_page_{page}.json"
+                    filename = f"{path}_error_response.json"
                     with open(filename, "w", encoding='utf-8') as f:
                         json.dump(response, f, ensure_ascii=False, indent=4)
             break
