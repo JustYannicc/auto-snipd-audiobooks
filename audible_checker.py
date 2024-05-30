@@ -9,9 +9,9 @@ import asyncio
 import re
 import json
 
-#FIXME: dont itterate the raw output file names. just name them wishlist_raw_response.json and library_raw_response.json and overwrite them if there is new data. 
 #FIXME: The finished tag is not being set correctly. It is always false.
 #FIXME: the wishlist is not being fetched correctly. The wishlist is not being fetched at all.
+#FIXME: The cover url is not being fetched 
 
 # Configure logging
 LOG_FILENAME = 'audible_checker.log'
@@ -31,7 +31,7 @@ logger.addHandler(handler)
 # Define database and table name
 DATABASE = 'audible_library.db'
 TABLE_NAME = 'books'
-TEST_MODE = False  # Change to True for more verbosity
+TEST_MODE = True  # Change to True for more verbosity
 
 def log_and_print(message, level=logging.INFO, always_print=False):
     if TEST_MODE or always_print:
@@ -157,6 +157,7 @@ def strip_markdown(text):
 async def fetch_all_items(client, path, response_groups):
     items = []
     page = 1  # Start pagination from page 1
+    response_data = []  # Store all response data
     while True:
         try:
             params = {
@@ -168,10 +169,8 @@ async def fetch_all_items(client, path, response_groups):
                 path=path,
                 params=params
             )
-            if TEST_MODE:
-                filename = f"{path}_raw_response.json"
-                with open(filename, "w", encoding='utf-8') as f:
-                    json.dump(response, f, ensure_ascii=False, indent=4)
+
+            response_data.append(response)  # Collect response for potential saving
 
             if not response or 'items' not in response or not response['items']:
                 break
@@ -190,6 +189,13 @@ async def fetch_all_items(client, path, response_groups):
                     with open(filename, "w", encoding='utf-8') as f:
                         json.dump(response, f, ensure_ascii=False, indent=4)
             break
+    
+    # Save the response data once at the end
+    if TEST_MODE:
+        filename = f"{path}_raw_response.json"
+        with open(filename, "w", encoding='utf-8') as f:
+            json.dump(response_data, f, ensure_ascii=False, indent=4)
+    
     return items
 
 async def fetch_audible_details(client):
@@ -214,6 +220,7 @@ async def fetch_audible_details(client):
     except Exception as e:
         log_and_print(f"Error fetching details: {e}", logging.ERROR, always_print=True)
         return None
+
     
 async def main_async(auth):
     async with audible.AsyncClient(auth=auth) as client:
